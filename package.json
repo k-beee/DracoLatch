@@ -4,6 +4,8 @@
   "description": "Autonomous Corporate Disclosure Escrow on GenLayer",
   "private": true,
   "scripts": {
+    "build": "npm --prefix frontend install && npm --prefix frontend run build",
+    "start": "npm --prefix frontend run preview",
     "test": "./scripts/verify_local.sh",
     "test:python": "python3 -m pytest -v tests/test_draco_latch.py",
     "lint:contract": "python3 -m genvm_linter.cli check contracts/draco_latch.py",

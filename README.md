@@ -188,15 +188,12 @@ cd frontend && npm install && npm run build
 1. Deploy `contracts/draco_latch.py` without constructor parameters. The deployer receives zero special privileges.
 2. Record the deployed contract address.
 
-### Step 3: Frontend Launch
-1. Copy `frontend/.env.example` to `frontend/.env` and set:
-   ```env
-   VITE_CONTRACT_ADDRESS=<DEPLOYED_CONTRACT_ADDRESS>
-   VITE_GENLAYER_NETWORK=studionet
-   ```
-2. Build and publish:
+### Step 3: Frontend Launch & Vercel Deployment
+1. Pre-configured with deployed contract `0x378640F3dbfC35F162945D12B73234138e211Bb6`.
+2. For zero-config cloud hosting, see the [Vercel Deployment Guide](VERCEL_DEPLOYMENT.md).
+3. To run locally:
    ```bash
-   cd frontend && npm run build
+   cd frontend && npm install && npm run dev
    ```
 
 ---
