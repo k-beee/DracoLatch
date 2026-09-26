@@ -633,6 +633,7 @@ class DracoLatch(gl.Contract):
 
         s["status"] = STATUS_CLAIMED
         s["reason"] = "RETRY_REQUESTED"
+        s["revision"] += 1
         b["status"] = STATUS_CLAIMED
 
         self._save_submission(s)
