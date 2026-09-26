@@ -15,6 +15,16 @@ Evidence hunters (**Claimants**) fulfill the bounty by submitting canonical U.S.
 3. Evaluate natural language disclosure compliance using the Equivalence Principle (`prompt_comparative`); and
 4. Atomically disburse escrowed GEN or reopen the bounty.
 
+## Live Deployment
+
+- **Deployed Contract:** [`0x378640F3dbfC35F162945D12B73234138e211Bb6`](https://explorer-studio-next.genlayer.com/address/0x378640F3dbfC35F162945D12B73234138e211Bb6)
+- **Network:** GenLayer Studio Next (Chain `61997`)
+- **Diagnostic Source Probe:** [`0x60d3f54658b15b07F29f08103317324a876CF638`](https://explorer-studio-next.genlayer.com/address/0x60d3f54658b15b07F29f08103317324a876CF638)
+- **Contract Source Parity:** 100% byte-for-byte verified via RPC (`tools/fetch_genlayer_contract.py`)
+- **E2E Evidence Matrix:** [`E2E_EVIDENCE.md`](E2E_EVIDENCE.md)
+
+---
+
 ```
                               /\             /\
                              /  \           /  \

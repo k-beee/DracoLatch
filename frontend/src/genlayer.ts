@@ -2,16 +2,14 @@ import { createClient } from 'genlayer-js';
 import { studioDevnet, studionet } from 'genlayer-js/chains';
 import type { CalldataEncodable, TransactionHash } from 'genlayer-js/types';
 
-export const CONTRACT_ADDRESS = (import.meta.env.VITE_CONTRACT_ADDRESS || '').trim();
+export const CONTRACT_ADDRESS = (import.meta.env.VITE_CONTRACT_ADDRESS || '0x378640F3dbfC35F162945D12B73234138e211Bb6').trim();
 export const IS_CONFIGURED = /^0x[a-fA-F0-9]{40}$/.test(CONTRACT_ADDRESS);
 
 export const SELECTED_CHAIN = (import.meta.env.VITE_GENLAYER_NETWORK || 'studioDevnet') === 'studionet' 
   ? studionet 
   : studioDevnet;
 
-export const EXPLORER_BASE = SELECTED_CHAIN.id === 61997
-  ? 'https://explorer-studio-dev.genlayer.com'
-  : 'https://explorer-studio.genlayer.com';
+export const EXPLORER_BASE = 'https://explorer-studio-next.genlayer.com';
 
 export const contractExplorerUrl = IS_CONFIGURED 
   ? `${EXPLORER_BASE}/address/${CONTRACT_ADDRESS}` 

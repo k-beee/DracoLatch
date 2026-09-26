@@ -1,0 +1,96 @@
+# DracoLatch End-to-End Verification & Deployment Evidence
+
+This document provides live on-chain deployment records, contract source verification, and reproducible execution evidence for **DracoLatch**.
+
+---
+
+## 1. Verified Live Deployment
+
+| Property | Value |
+| :--- | :--- |
+| **Protocol Name** | `DracoLatch` |
+| **Network** | GenLayer Studio Next (Chain `61997`) |
+| **Deployed Contract** | [`0x378640F3dbfC35F162945D12B73234138e211Bb6`](https://explorer-studio-next.genlayer.com/address/0x378640F3dbfC35F162945D12B73234138e211Bb6) |
+| **Source Byte Parity** | **100% Byte-for-Byte Match** against `contracts/draco_latch.py` (Verified via JSON-RPC) |
+| **GenVM Linter Status** | **PASS** (3/3 checks passed, 13 methods: 4 view, 9 write) |
+| **Source Authority** | U.S. Securities and Exchange Commission (SEC) EDGAR Archive |
+| **Diagnostic Probe** | [`0x60d3f54658b15b07F29f08103317324a876CF638`](https://explorer-studio-next.genlayer.com/address/0x60d3f54658b15b07F29f08103317324a876CF638) |
+
+The contract constructor requires zero arguments and stores no privileged deployer address. All roles are derived permissionlessly per bounty: the funding wallet becomes that bounty's Sponsor, and any different address can submit a claim.
+
+---
+
+## 2. On-Chain Introspection Query (RPC Verified)
+
+Live query via `genlayer-js` against `https://studio-dev.genlayer.com/api`:
+
+```json
+{
+  "protocol": {
+    "name": "DracoLatch",
+    "version": 1,
+    "architecture": "commit-reveal-disclosure-escrow",
+    "authority": "SEC EDGAR Canonical Archive",
+    "frontrunning_protection": true,
+    "active_disputes": true,
+    "custody": true
+  },
+  "totals": {
+    "bounties": 0,
+    "locked_wei": "0",
+    "paid_wei": "0",
+    "refunded_wei": "0",
+    "submissions": 0
+  }
+}
+```
+
+---
+
+## 3. End-to-End Operational Lifecycle Matrix
+
+Reviewers can execute and audit three distinct live lifecycles using any two distinct wallets (Sponsor & Hunter):
+
+### Path A: Happy Path with Commit-Reveal & Payout
+1. **Sponsor:** Calls `create_bounty` with attached native GEN value ($\ge 0.001$ GEN). State becomes `OPEN`.
+2. **Hunter:** Generates `commitment = sha256(claimant + accession + salt)` and calls `commit_claim`. State becomes `RESERVED`, preventing mempool frontrunning.
+3. **Hunter:** Calls `reveal_and_submit` with accession, document name, expected digest, and salt. State becomes `CLAIMED`.
+4. **Sponsor / Hunter:** Calls `assess_submission`. Validators fetch SEC archive, verify byte digest preflight, evaluate natural language conditions, and reach `MATCH_PENDING` comparative consensus.
+5. **Hunter:** After the challenge window lapses, calls `finalize_match`. Contract transfers locked GEN directly to claimant and commits `PAID`.
+
+### Path B: Active Challenge & Dispute Path
+1. Steps 1–4 from Path A.
+2. **Sponsor:** During the open challenge window, calls `challenge_match(submission_id, "Omitted material duties")`.
+3. Contract immediately transitions to `DISPUTED`, halting automated payout and protecting sponsor capital.
+
+### Path C: Digest Mismatch, Bounded Retries, and Sponsor Recovery
+1. **Sponsor:** Calls `create_bounty` with attached GEN value.
+2. **Hunter:** Submits an invalid or corrupted SHA-256 digest via `submit_direct`.
+3. **Sponsor:** Calls `assess_submission`. Fails closed as `UNRESOLVED / DIGEST_MISMATCH`.
+4. **Sponsor / Hunter:** Calls `retry_unresolved` up to `MAX_ASSESSMENT_RETRIES` (2 attempts).
+5. **Sponsor:** Calls `recover_bounty`. Contract returns 100% of escrowed principal to sponsor and commits `REFUNDED`.
+
+---
+
+## 4. Local Test & Static Analysis Evidence
+
+All 14 unit and adversarial tests pass in 0.02s:
+
+```text
+tests/test_draco_latch.py::test_permissionless_sponsor_and_self_claim_guard PASSED
+tests/test_draco_latch.py::test_commit_reveal_claim_flow_and_anti_frontrunning PASSED
+tests/test_draco_latch.py::test_commit_reveal_expiry_and_salt_mismatch PASSED
+tests/test_draco_latch.py::test_happy_path_real_custody_and_payout PASSED
+tests/test_draco_latch.py::test_active_dispute_challenge_mechanism PASSED
+tests/test_draco_latch.py::test_digest_mismatch_retries_and_sponsor_recovery PASSED
+tests/test_draco_latch.py::test_semantic_not_match_reopens_bounty_and_blocks_accession_replay PASSED
+tests/test_draco_latch.py::test_metadata_provenance_failure_fails_closed PASSED
+tests/test_draco_latch.py::test_model_contradiction_fails_closed PASSED
+tests/test_draco_latch.py::test_consensus_divergence_fails_closed PASSED
+tests/test_draco_latch.py::test_outsider_cannot_grief_assessment_or_retry_budget PASSED
+tests/test_draco_latch.py::test_invalid_payable_inputs_are_immediately_refunded PASSED
+tests/test_draco_latch.py::test_economic_conservation_across_independent_bounties PASSED
+tests/test_draco_latch.py::test_html_tag_stripping_and_sanitization PASSED
+
+============================== 14 passed in 0.02s ==============================
+```
