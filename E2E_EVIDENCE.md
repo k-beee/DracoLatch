@@ -20,30 +20,49 @@ The contract constructor requires zero arguments and stores no privileged deploy
 
 ---
 
-## 2. On-Chain Introspection Query (RPC Verified)
+## 2. On-Chain Introspection & Test Transaction Evidence
 
-Live query via `genlayer-js` against `https://studio-dev.genlayer.com/api`:
+### Verified Live Test Transaction (`create_bounty`)
+- **Transaction Hash:** [`0x79e594f22db1ff34576d44cf4e368b35696c6b23bfad5a22ed22eb75b9d1dea9`](https://explorer-studio-next.genlayer.com/tx/0x79e594f22db1ff34576d44cf4e368b35696c6b23bfad5a22ed22eb75b9d1dea9)
+- **Sender Address:** `0xadF532d180D50F4F71a39A909FEa1F941BfC8a45`
+- **Contract Address:** [`0x378640F3dbfC35F162945D12B73234138e211Bb6`](https://explorer-studio-next.genlayer.com/address/0x378640F3dbfC35F162945D12B73234138e211Bb6)
+- **Value Escrowed:** `0.01 GEN` (`10000000000000000 wei`)
+- **Consensus Result:** `MAJORITY_AGREE` (Round 0, 5/5 validator votes committed/revealed)
+- **Lifecycle State:** `FINALIZED` (Accepted)
 
+### Live Query Responses (RPC Verified)
+
+**Contract Totals (`get_totals()`):**
 ```json
 {
-  "protocol": {
-    "name": "DracoLatch",
-    "version": 1,
-    "architecture": "commit-reveal-disclosure-escrow",
-    "authority": "SEC EDGAR Canonical Archive",
-    "frontrunning_protection": true,
-    "active_disputes": true,
-    "custody": true
-  },
-  "totals": {
-    "bounties": 0,
-    "locked_wei": "0",
-    "paid_wei": "0",
-    "refunded_wei": "0",
-    "submissions": 0
-  }
+  "bounties": 1,
+  "locked_wei": "10000000000000000",
+  "paid_wei": "0",
+  "refunded_wei": "0",
+  "submissions": 0
 }
 ```
+
+**Bounty #1 State (`get_bounty(1)`):**
+```json
+{
+  "id": 1,
+  "title": "SEC 8-K Succession Bounty (Studio Next Test)",
+  "requirement": "Confirm Apple planned executive succession and transition duties on Form 8-K.",
+  "sponsor": "0xadf532d180d50f4f71a39a909fea1f941bfc8a45",
+  "status": "OPEN",
+  "locked_wei": "10000000000000000",
+  "cik": "0000320193",
+  "allowed_form": "8-K",
+  "filing_start": 1700000000,
+  "filing_end": 1800000000,
+  "challenge_window": 300,
+  "active_submission": 0,
+  "created_at": 1790441554,
+  "submission_deadline": 1790527954
+}
+```
+
 
 ---
 
