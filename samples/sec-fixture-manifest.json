@@ -1,0 +1,36 @@
+{
+  "manifest_version": "1.0.0",
+  "authority": "U.S. Securities and Exchange Commission (SEC) EDGAR System",
+  "description": "Canonical verified SEC EDGAR fixtures used for DracoLatch validator consensus testing and live demonstrations.",
+  "fixtures": [
+    {
+      "fixture_id": "apple-8k-coo-succession-2025",
+      "company_name": "Apple Inc.",
+      "cik": "0000320193",
+      "form": "8-K",
+      "accession": "0001140361-25-025275",
+      "primary_document": "ef20051741_8k.htm",
+      "canonical_archive_url": "https://www.sec.gov/Archives/edgar/data/320193/000114036125025275/ef20051741_8k.htm",
+      "index_headers_url": "https://www.sec.gov/Archives/edgar/data/320193/000114036125025275/0001140361-25-025275-index-headers.html",
+      "byte_length": 38298,
+      "sha256": "79d278b5c34a40ec5618d5286c983120346ebb58ccd8587339533b88e7f22e37",
+      "filing_date_utc": "2025-06-25",
+      "semantic_requirement": "Confirm a planned COO succession naming the successor and the outgoing executive's transition duties.",
+      "expected_verdict": "MATCH",
+      "expected_reason": "REQUIREMENT_SATISFIED"
+    },
+    {
+      "fixture_id": "apple-8k-semantic-negative",
+      "company_name": "Apple Inc.",
+      "cik": "0000320193",
+      "form": "8-K",
+      "accession": "0001140361-25-025275",
+      "primary_document": "ef20051741_8k.htm",
+      "byte_length": 38298,
+      "sha256": "79d278b5c34a40ec5618d5286c983120346ebb58ccd8587339533b88e7f22e37",
+      "semantic_requirement": "Confirm that Apple announced a hostile tender offer to acquire a deep-sea geothermal energy consortium.",
+      "expected_verdict": "NOT_MATCH",
+      "expected_reason": "EVENT_MISMATCH"
+    }
+  ]
+}
