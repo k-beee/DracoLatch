@@ -1,0 +1,24 @@
+{
+  "name": "dracolatch",
+  "version": "1.0.0",
+  "description": "Autonomous Corporate Disclosure Escrow on GenLayer",
+  "private": true,
+  "scripts": {
+    "test": "./scripts/verify_local.sh",
+    "test:python": "python3 -m pytest -v tests/test_draco_latch.py",
+    "lint:contract": "python3 -m genvm_linter.cli check contracts/draco_latch.py",
+    "lint:probe": "python3 -m genvm_linter.cli check contracts/draco_source_probe.py",
+    "build:frontend": "npm --prefix frontend run build",
+    "dev:frontend": "npm --prefix frontend run dev"
+  },
+  "keywords": [
+    "genlayer",
+    "intelligent-contracts",
+    "escrow",
+    "sec-edgar",
+    "ai-consensus",
+    "commit-reveal"
+  ],
+  "author": "k bee",
+  "license": "MIT"
+}
