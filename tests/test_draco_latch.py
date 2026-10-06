@@ -16,12 +16,14 @@ Simulates the GenLayer Python SDK runtime and verifies:
 - Content sanitization and HTML tag stripping
 """
 
+from __future__ import annotations
 import hashlib
 import importlib.util
 import json
 from pathlib import Path
 import sys
 import types
+import typing
 import pytest
 
 # Test Addresses
