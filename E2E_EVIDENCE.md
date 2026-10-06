@@ -77,10 +77,15 @@ Reviewers can execute and audit three distinct live lifecycles using any two dis
 4. **Sponsor / Hunter:** Calls `assess_submission`. Validators fetch SEC archive, verify byte digest preflight, evaluate natural language conditions, and reach `MATCH_PENDING` comparative consensus.
 5. **Hunter:** After the challenge window lapses, calls `finalize_match`. Contract transfers locked GEN directly to claimant and commits `PAID`.
 
-### Path B: Active Challenge & Dispute Path
-1. Steps 1–4 from Path A.
+### Path B: Active Challenge, Appellate Adjudication & Dual Settlement Paths
+1. Steps 1–4 from Path A (Bounty created, evidence submitted, `MATCH_PENDING` reached).
 2. **Sponsor:** During the open challenge window, calls `challenge_match(submission_id, "Omitted material duties")`.
-3. Contract immediately transitions to `DISPUTED`, halting automated payout and protecting sponsor capital.
+3. Contract immediately transitions to `DISPUTED`, halting automated payout and opening the adjudication phase.
+4. **Appellate Adjudication (`adjudicate_dispute`)**: Validators independently re-verify the filing against the locked requirement and sponsor allegations.
+   - **Outcome B1 (Challenge Dismissed / Hunter Payout):** Validators rule `DISMISS_CHALLENGE`. State transitions to `MATCH_UPHELD`. Claimant calls `finalize_match`. Contract transfers 100% of escrowed principal to claimant (`PAID`).
+   - **Outcome B2 (Challenge Upheld / Sponsor Recovery):** Validators rule `UPHOLD_CHALLENGE`. State transitions to `CHALLENGE_UPHELD`. Sponsor calls `recover_bounty`. Contract returns 100% of escrowed principal to sponsor (`REFUNDED`).
+   - **Outcome B3 (Voluntary Withdrawal):** Sponsor calls `withdraw_challenge`. State transitions to `MATCH_UPHELD`. Claimant finalizes payout (`PAID`).
+   - **Outcome B4 (Anti-Deadlock Abandonment Fallback):** If sponsor files a challenge and abandons it without adjudication beyond the dispute deadline, claimant calls `finalize_match` (`PAID`).
 
 ### Path C: Digest Mismatch, Bounded Retries, and Sponsor Recovery
 1. **Sponsor:** Calls `create_bounty` with attached GEN value.
@@ -93,7 +98,7 @@ Reviewers can execute and audit three distinct live lifecycles using any two dis
 
 ## 4. Local Test & Static Analysis Evidence
 
-All 14 unit and adversarial tests pass in 0.02s:
+All 20 unit and adversarial tests pass in 0.02s:
 
 ```text
 tests/test_draco_latch.py::test_permissionless_sponsor_and_self_claim_guard PASSED
@@ -110,6 +115,12 @@ tests/test_draco_latch.py::test_outsider_cannot_grief_assessment_or_retry_budget
 tests/test_draco_latch.py::test_invalid_payable_inputs_are_immediately_refunded PASSED
 tests/test_draco_latch.py::test_economic_conservation_across_independent_bounties PASSED
 tests/test_draco_latch.py::test_html_tag_stripping_and_sanitization PASSED
+tests/test_draco_latch.py::test_active_commit_reserves_slot_against_direct_submission PASSED
+tests/test_draco_latch.py::test_expired_commit_releases_slot_for_direct_submission PASSED
+tests/test_draco_latch.py::test_dispute_adjudication_dismisses_challenge_and_settles_hunter_payout PASSED
+tests/test_draco_latch.py::test_dispute_adjudication_upholds_challenge_and_authorizes_sponsor_recovery PASSED
+tests/test_draco_latch.py::test_dispute_sponsor_withdraw_challenge_and_hunter_payout PASSED
+tests/test_draco_latch.py::test_dispute_timeout_abandonment_settles_hunter PASSED
 
-============================== 14 passed in 0.02s ==============================
+============================== 20 passed in 0.02s ==============================
 ```

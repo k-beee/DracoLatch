@@ -89,11 +89,34 @@ Complete specification of public methods, data structures, and invariants for `D
 - **Condition:** Submission must be in `MATCH_PENDING` status prior to `challenge_deadline`.
 - **Returns:** `"DISPUTED"` or error string.
 
+### `adjudicate_dispute`
+- **Decorator:** `@gl.public.write`
+- **Parameters:**
+  - `submission_id: u256`
+  - `expected_revision: u256`
+- **Permission:** Sponsor or Submission Claimant.
+- **Condition:** Submission and Bounty must be in `DISPUTED` status.
+- **Effects:** Multi-validator appellate consensus evaluates filing against locked requirements and sponsor allegations:
+  - If `DISMISS_CHALLENGE`: Transitions to `MATCH_UPHELD`, authorizing Claimant to finalize payout.
+  - If `UPHOLD_CHALLENGE`: Transitions to `CHALLENGE_UPHELD`, authorizing Sponsor to recover escrowed capital.
+- **Returns:** Status string (`MATCH_UPHELD`, `CHALLENGE_UPHELD`, or `UNRESOLVED`).
+
+### `withdraw_challenge`
+- **Decorator:** `@gl.public.write`
+- **Parameters:** `submission_id: u256`
+- **Permission:** Sponsor only.
+- **Condition:** Submission and Bounty in `DISPUTED` status.
+- **Effects:** Voluntarily dismisses challenge, transitions to `MATCH_UPHELD`, unlocks immediate finalization.
+- **Returns:** `"MATCH_UPHELD"` or error string.
+
 ### `finalize_match`
 - **Decorator:** `@gl.public.write`
 - **Parameters:** `submission_id: u256`
 - **Permission:** Submission claimant only.
-- **Condition:** Submission in `MATCH_PENDING`, `now() > challenge_deadline`, not disputed.
+- **Conditions (any of the following):**
+  1. `s.status == MATCH_PENDING` and `now() > challenge_deadline` (Challenge window lapsed without dispute).
+  2. `s.status == MATCH_UPHELD` (Dispute adjudicated in hunter's favor, or challenge voluntarily withdrawn).
+  3. `s.status == DISPUTED` and `now() > dispute_deadline` (Anti-deadlock fallback if sponsor abandons challenge).
 - **Effects:** Clears `locked_wei = 0`, sets `PAID`, transfers GEN to claimant.
 - **Returns:** `"PAID"` or error string.
 
@@ -101,6 +124,10 @@ Complete specification of public methods, data structures, and invariants for `D
 - **Decorator:** `@gl.public.write`
 - **Parameters:** `bounty_id: u256`
 - **Permission:** Bounty sponsor only.
-- **Condition:** Bounty open past submission deadline OR active submission exhausted retries in `UNRESOLVED`.
+- **Conditions (any of the following):**
+  1. Bounty in `OPEN` past `submission_deadline`.
+  2. Active submission exhausted retries in `UNRESOLVED`.
+  3. Bounty in `CHALLENGE_UPHELD` (Dispute adjudicated in sponsor's favor).
 - **Effects:** Clears `locked_wei = 0`, sets `REFUNDED`, returns GEN to sponsor.
 - **Returns:** `"REFUNDED"` or error string.
+

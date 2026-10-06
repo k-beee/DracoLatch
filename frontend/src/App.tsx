@@ -260,6 +260,23 @@ export default function App() {
     );
   };
 
+  const handleAdjudicateDispute = () => {
+    const rev = Number(submission?.revision || 1);
+    return executeTx(
+      'Adjudicate Dispute (Validators)',
+      'adjudicate_dispute',
+      [Number(submissionId), rev]
+    );
+  };
+
+  const handleWithdrawChallenge = () => {
+    return executeTx(
+      'Withdraw Dispute (Sponsor)',
+      'withdraw_challenge',
+      [Number(submissionId)]
+    );
+  };
+
   const handleFinalizeMatch = () => {
     return executeTx(
       'Finalize Payout (Claimant)',
@@ -416,11 +433,31 @@ export default function App() {
               <button 
                 className="btn-secondary" 
                 onClick={handleRecoverBounty}
-                disabled={!!isBusy}
+                disabled={!!isBusy || !['OPEN', 'UNRESOLVED', 'CHALLENGE_UPHELD'].includes(bounty?.status || '')}
               >
-                Recover Expired
+                Recover Escrow
               </button>
             </div>
+
+            {bounty?.status === 'DISPUTED' && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginTop: '0.75rem' }}>
+                <button 
+                  className="btn-secondary" 
+                  onClick={handleAdjudicateDispute}
+                  disabled={!!isBusy}
+                  style={{ borderColor: '#F59E0B', color: '#FCD34D' }}
+                >
+                  <Sparkles size={15} /> Adjudicate Dispute
+                </button>
+                <button 
+                  className="btn-secondary" 
+                  onClick={handleWithdrawChallenge}
+                  disabled={!!isBusy}
+                >
+                  Withdraw Dispute
+                </button>
+              </div>
+            )}
           </div>
 
           {/* HUNTER DESK */}
@@ -519,7 +556,7 @@ export default function App() {
                 <button 
                   className="btn-primary" 
                   onClick={handleFinalizeMatch}
-                  disabled={!!isBusy || submission?.status !== 'MATCH_PENDING'}
+                  disabled={!!isBusy || !['MATCH_PENDING', 'MATCH_UPHELD'].includes(submission?.status || '')}
                 >
                   <CheckCircle2 size={15} /> Finalize Payout
                 </button>

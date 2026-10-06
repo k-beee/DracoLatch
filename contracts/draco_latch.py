@@ -35,6 +35,8 @@ STATUS_OPEN = "OPEN"
 STATUS_RESERVED = "RESERVED"
 STATUS_CLAIMED = "CLAIMED"
 STATUS_MATCH_PENDING = "MATCH_PENDING"
+STATUS_MATCH_UPHELD = "MATCH_UPHELD"
+STATUS_CHALLENGE_UPHELD = "CHALLENGE_UPHELD"
 STATUS_NOT_MATCH = "NOT_MATCH"
 STATUS_UNRESOLVED = "UNRESOLVED"
 STATUS_DISPUTED = "DISPUTED"
@@ -55,6 +57,9 @@ REASON_SOURCE_OVERSIZED = "SOURCE_EMPTY_OR_OVERSIZED"
 REASON_MODEL_SCHEMA_INVALID = "MODEL_SCHEMA_INVALID"
 REASON_MODEL_CONTRADICTION = "MODEL_CONTRADICTION"
 REASON_CHALLENGE_REGISTERED = "CHALLENGE_REGISTERED"
+REASON_CHALLENGE_UPHELD = "CHALLENGE_UPHELD"
+REASON_CHALLENGE_DISMISSED = "CHALLENGE_DISMISSED"
+REASON_CHALLENGE_WITHDRAWN = "CHALLENGE_WITHDRAWN"
 
 # ==============================================================================
 # External Transfer Interface
@@ -241,6 +246,8 @@ class DracoLatch(gl.Contract):
             "status": STATUS_OPEN,
             "locked_wei": attached,
             "active_submission": 0,
+            "active_committer": "",
+            "commit_deadline": 0,
             "created_at": now_ts
         }
 
@@ -257,7 +264,7 @@ class DracoLatch(gl.Contract):
         """
         Phase 1 of Commit-Reveal Claim Protocol (Anti-Frontrunning Guard).
         Hunters commit: sha256(claimant_address + accession + salt).
-        Reserves the claim slot without exposing the accession in plaintext to the mempool.
+        Atomically reserves the claim slot against direct submissions and competing committers.
         """
         b = self._get_bounty(bounty_id)
         if b is None:
@@ -267,7 +274,16 @@ class DracoLatch(gl.Contract):
         if caller == b["sponsor"]:
             return "ERR_SPONSOR_CANNOT_CLAIM"
 
-        if b["status"] != STATUS_OPEN or current_timestamp() > b["submission_deadline"]:
+        now_ts = current_timestamp()
+        if now_ts > b["submission_deadline"]:
+            return "ERR_BOUNTY_NOT_OPEN"
+
+        # Check existing reservation status
+        if b["status"] == STATUS_RESERVED:
+            # Active reservation held by another hunter
+            if now_ts <= b.get("commit_deadline", 0) and caller != b.get("active_committer", ""):
+                return "ERR_BOUNTY_ALREADY_RESERVED"
+        elif b["status"] != STATUS_OPEN:
             return "ERR_BOUNTY_NOT_OPEN"
 
         norm_hash = commitment_hash.strip().lower()
@@ -277,10 +293,17 @@ class DracoLatch(gl.Contract):
         commit_key = f"{int(bounty_id)}:{caller}"
         commit_data = {
             "commitment": norm_hash,
-            "timestamp": current_timestamp(),
+            "timestamp": now_ts,
             "claimant": caller
         }
         self.claim_commitments[commit_key] = canonical_json(commit_data)
+
+        # Atomically reserve bounty claim slot for this committer
+        b["status"] = STATUS_RESERVED
+        b["active_committer"] = caller
+        b["commit_deadline"] = now_ts + COMMITMENT_EXPIRY_SEC
+        self._save_bounty(b)
+
         return "COMMITMENT_RECORDED"
 
     @gl.public.write
@@ -295,8 +318,12 @@ class DracoLatch(gl.Contract):
         """
         Phase 2 of Commit-Reveal Protocol:
         Reveals the committed accession, document name, and digest with salt.
-        Verifies caller is the original committer before progressing to assessment.
+        Verifies caller holds the active reservation before progressing to assessment.
         """
+        b = self._get_bounty(bounty_id)
+        if b is None:
+            return "ERR_BOUNTY_NOT_FOUND"
+
         caller = current_sender()
         commit_key = f"{int(bounty_id)}:{caller}"
         saved_commit = self.claim_commitments.get(commit_key)
@@ -305,7 +332,8 @@ class DracoLatch(gl.Contract):
             return "ERR_NO_ACTIVE_COMMITMENT"
 
         c_data = json.loads(saved_commit)
-        if current_timestamp() - int(c_data["timestamp"]) > COMMITMENT_EXPIRY_SEC:
+        now_ts = current_timestamp()
+        if now_ts - int(c_data["timestamp"]) > COMMITMENT_EXPIRY_SEC:
             return "ERR_COMMITMENT_EXPIRED"
 
         clean_acc = accession.strip()
@@ -313,8 +341,12 @@ class DracoLatch(gl.Contract):
         if expected_hash != c_data["commitment"]:
             return "ERR_COMMITMENT_MISMATCH"
 
+        if b["status"] == STATUS_RESERVED and b.get("active_committer", "") != caller:
+            if now_ts <= b.get("commit_deadline", 0):
+                return "ERR_SLOT_RESERVED_BY_ANOTHER"
+
         # Proceed to record submission
-        return self._record_submission_entry(bounty_id, clean_acc, primary_document, expected_sha256)
+        return self._record_submission_entry(bounty_id, clean_acc, primary_document, expected_sha256, is_reveal=True)
 
     @gl.public.write
     def submit_direct(
@@ -326,18 +358,20 @@ class DracoLatch(gl.Contract):
     ) -> typing.Any:
         """
         Direct submission pathway.
-        Bypasses commitment phase when frontrunning protection is not required by caller.
+        Allowed when the bounty is OPEN or when a prior reservation has expired.
+        Rejected if an active commitment has reserved the slot.
         """
-        return self._record_submission_entry(bounty_id, accession.strip(), primary_document, expected_sha256)
+        return self._record_submission_entry(bounty_id, accession.strip(), primary_document, expected_sha256, is_reveal=False)
 
     def _record_submission_entry(
         self,
         bounty_id: u256,
         accession: str,
         primary_document: str,
-        expected_sha256: str
+        expected_sha256: str,
+        is_reveal: bool = False
     ) -> typing.Any:
-        """Internal helper to validate identifiers and commit submission to state."""
+        """Internal helper to validate identifiers, enforce reservation locks, and record submission."""
         b = self._get_bounty(bounty_id)
         if b is None:
             return "ERR_BOUNTY_NOT_FOUND"
@@ -346,7 +380,17 @@ class DracoLatch(gl.Contract):
         if caller == b["sponsor"]:
             return "ERR_SPONSOR_CANNOT_CLAIM"
 
-        if b["status"] != STATUS_OPEN or current_timestamp() > b["submission_deadline"]:
+        now_ts = current_timestamp()
+        if now_ts > b["submission_deadline"]:
+            return "ERR_BOUNTY_NOT_OPEN"
+
+        # Reservation enforcement
+        if b["status"] == STATUS_RESERVED:
+            is_active_lock = now_ts <= b.get("commit_deadline", 0)
+            if is_active_lock:
+                if not is_reveal or caller != b.get("active_committer", ""):
+                    return "ERR_SLOT_RESERVED_BY_COMMITMENT"
+        elif b["status"] != STATUS_OPEN:
             return "ERR_BOUNTY_NOT_OPEN"
 
         doc = primary_document.strip()
@@ -385,6 +429,8 @@ class DracoLatch(gl.Contract):
             "evidence_digest": "",
             "verdict_digest": "",
             "challenge_deadline": 0,
+            "dispute_reason": "",
+            "dispute_deadline": 0,
             "revision": 1
         }
 
@@ -393,6 +439,8 @@ class DracoLatch(gl.Contract):
 
         b["status"] = STATUS_CLAIMED
         b["active_submission"] = int(new_sid)
+        b["active_committer"] = ""
+        b["commit_deadline"] = 0
         self._save_bounty(b)
         return new_sid
 
@@ -576,8 +624,8 @@ class DracoLatch(gl.Contract):
     def challenge_match(self, submission_id: u256, dispute_reason: str) -> str:
         """
         Active Dispute Mechanism:
-        Allows the Bounty Sponsor (or challenger) to dispute a MATCH_PENDING verdict
-        during the open challenge window. Halts instant finalization and transitions to DISPUTED.
+        Allows the Bounty Sponsor to dispute a MATCH_PENDING verdict during the challenge window.
+        Halts automated payout, opens the adjudication phase, and transitions bounty to DISPUTED.
         """
         s = self._get_submission(submission_id)
         if s is None:
@@ -586,25 +634,210 @@ class DracoLatch(gl.Contract):
         b = self._get_bounty(u256(s["bounty_id"]))
         caller = current_sender()
 
-        # Only the Sponsor can halt finalization without posting an external bond
+        # Only the Sponsor can challenge
         if caller != b["sponsor"]:
             return "ERR_ONLY_SPONSOR_MAY_CHALLENGE"
 
         if s["status"] != STATUS_MATCH_PENDING:
             return "ERR_SUBMISSION_NOT_CHALLENGEABLE"
 
-        if current_timestamp() > s["challenge_deadline"]:
+        now_ts = current_timestamp()
+        if now_ts > s["challenge_deadline"]:
             return "ERR_CHALLENGE_WINDOW_EXPIRED"
 
         clean_reason = dispute_reason.strip()[:100]
+        if len(clean_reason) == 0:
+            clean_reason = "Unspecified deficiency in evidence"
+
         s["status"] = STATUS_DISPUTED
         s["reason"] = f"DISPUTED: {clean_reason}"
+        s["dispute_reason"] = clean_reason
+        s["dispute_started_at"] = now_ts
+        # Dispute window allows at least challenge window or 24h
+        s["dispute_deadline"] = now_ts + max(int(b["challenge_window"]), 86400)
         s["revision"] += 1
 
         b["status"] = STATUS_DISPUTED
         self._save_submission(s)
         self._save_bounty(b)
         return STATUS_DISPUTED
+
+    @gl.public.write
+    def adjudicate_dispute(self, submission_id: u256, expected_revision: u256) -> str:
+        """
+        Adjudication and Settlement Engine for Challenged Matches.
+        Executes multi-validator appellate review comparing locked requirements,
+        filing evidence, and sponsor dispute allegations.
+        Restricted to Bounty Sponsor or Submission Claimant.
+        """
+        s = self._get_submission(submission_id)
+        if s is None:
+            return "ERR_SUBMISSION_NOT_FOUND"
+
+        b = self._get_bounty(u256(s["bounty_id"]))
+        caller = current_sender()
+
+        if caller != b["sponsor"] and caller != s["claimant"]:
+            return "ERR_ONLY_PARTICIPANT_PERMITTED"
+
+        if s["revision"] != int(expected_revision):
+            return "ERR_STALE_REVISION"
+
+        if s["status"] != STATUS_DISPUTED or b["status"] != STATUS_DISPUTED:
+            return "ERR_SUBMISSION_NOT_DISPUTED"
+
+        cik = b["cik"]
+        accession = s["accession"]
+        doc = s["primary_document"]
+        expected_digest = s["expected_sha256"]
+        req_text = b["requirement"]
+        form_type = b["allowed_form"]
+        win_start = b["filing_start"]
+        win_end = b["filing_end"]
+        dispute_grounds = s.get("dispute_reason", "Alleged material non-compliance")
+
+        compact_acc = accession.replace("-", "")
+        cik_clean = str(int(cik))
+        base_archive_url = f"https://www.sec.gov/Archives/edgar/data/{cik_clean}/{compact_acc}/"
+        index_url = f"{base_archive_url}{accession}-index-headers.html"
+        document_url = f"{base_archive_url}{doc}"
+
+        def validator_adjudication_routine() -> str:
+            req_headers = {
+                "Accept": "text/html,text/plain",
+                "User-Agent": "DracoLatch-Consensus/1.0 research-contact@example.org"
+            }
+            try:
+                meta_res = gl.nondet.web.get(index_url, headers=req_headers)
+                body_res = gl.nondet.web.get(document_url, headers=req_headers)
+
+                if int(meta_res.status) != 200 or int(body_res.status) != 200:
+                    return make_failure_result(REASON_SOURCE_UNAVAILABLE)
+
+                raw_bytes = body_res.body or b""
+                meta_text = (meta_res.body or b"")[:MAX_PAYLOAD_BYTES].decode("utf-8", errors="replace")
+
+                if len(raw_bytes) == 0 or len(raw_bytes) > MAX_PAYLOAD_BYTES:
+                    return make_failure_result(REASON_SOURCE_OVERSIZED)
+
+                actual_digest = sha256_hex(raw_bytes)
+                if actual_digest != expected_digest:
+                    return make_failure_result(REASON_DIGEST_MISMATCH)
+
+                if (accession not in meta_text or cik not in meta_text or
+                    doc not in meta_text or form_type not in meta_text.upper()):
+                    return make_failure_result(REASON_PROVENANCE_MISMATCH)
+
+                raw_text_decoded = raw_bytes.decode("utf-8", errors="replace")
+                sanitized_content = strip_html_tags(raw_text_decoded)
+
+                prompt_instruction = (
+                    "You are a strict SEC appellate dispute adjudication validator.\n"
+                    "A corporate disclosure bounty match was provisionally approved but challenged by the Sponsor.\n"
+                    "Carefully examine the original requirement, the filing excerpt, and the sponsor's specific challenge.\n\n"
+                    "LOCKED_REQUIREMENT:\n"
+                    f"{req_text}\n\n"
+                    "SPONSOR_CHALLENGE_REASON:\n"
+                    f"{dispute_grounds}\n\n"
+                    f"CIK: {cik} | ACCESSION: {accession} | FORM: {form_type}\n"
+                    f"FILING_WINDOW_UNIX: {win_start}..{win_end}\n\n"
+                    "FILING_BODY_BEGIN\n"
+                    f"{sanitized_content[:100000]}\n"
+                    "FILING_BODY_END\n\n"
+                    "DECISION CRITERIA:\n"
+                    "- 'UPHOLD_CHALLENGE': Sponsor is correct. The evidence fails the requirement or the challenge identifies a genuine fatal defect.\n"
+                    "- 'DISMISS_CHALLENGE': Sponsor is incorrect. The evidence substantively satisfies all required elements and the challenge is groundless.\n\n"
+                    "RETURN ONLY VALID JSON with exactly these three fields:\n"
+                    "- verdict: 'UPHOLD_CHALLENGE' or 'DISMISS_CHALLENGE'\n"
+                    "- reason_code: 'CHALLENGE_UPHELD' or 'CHALLENGE_DISMISSED'\n"
+                    "- explanation: string summary under 160 chars\n"
+                )
+
+                prompt_output = gl.nondet.exec_prompt(prompt_instruction, response_format="json")
+                res_dict = prompt_output if isinstance(prompt_output, dict) else json.loads(str(prompt_output))
+
+                expected_keys = {"verdict", "reason_code", "explanation"}
+                if not isinstance(res_dict, dict) or set(res_dict) != expected_keys:
+                    return make_failure_result(REASON_MODEL_SCHEMA_INVALID)
+
+                if res_dict["verdict"] not in ("UPHOLD_CHALLENGE", "DISMISS_CHALLENGE"):
+                    return make_failure_result(REASON_MODEL_SCHEMA_INVALID)
+
+                return canonical_json({
+                    "kind": "ADJUDICATED",
+                    "verdict": res_dict["verdict"],
+                    "reason": res_dict["reason_code"],
+                    "explanation": str(res_dict.get("explanation", ""))[:160]
+                })
+            except Exception:
+                return make_failure_result(REASON_SOURCE_UNAVAILABLE)
+
+        consensus_text = gl.eq_principle.prompt_comparative(
+            validator_adjudication_routine,
+            "Agreement requires matching appellate verdict (UPHOLD_CHALLENGE vs DISMISS_CHALLENGE) and reason code. "
+            "Fail-closed to UNRESOLVED on any divergence or error."
+        )
+
+        try:
+            parsed_consensus = json.loads(consensus_text)
+        except Exception:
+            parsed_consensus = {"kind": "UNRESOLVED", "reason": "ERR_CONSENSUS_PARSE_FAILURE"}
+
+        s["attempts"] += 1
+        s["revision"] += 1
+
+        if parsed_consensus.get("kind") != "ADJUDICATED":
+            s["status"] = STATUS_UNRESOLVED
+            b["status"] = STATUS_UNRESOLVED
+            s["reason"] = str(parsed_consensus.get("reason", STATUS_UNRESOLVED))[:80]
+        else:
+            verdict = parsed_consensus["verdict"]
+            reason = parsed_consensus["reason"]
+            s["reason"] = f"ADJUDICATED: {verdict}:{reason}"
+            s["verdict_digest"] = sha256_hex(consensus_text.encode("utf-8"))
+
+            if verdict == "DISMISS_CHALLENGE":
+                # Challenge dismissed: Hunter payout authorized
+                s["status"] = STATUS_MATCH_UPHELD
+                b["status"] = STATUS_MATCH_UPHELD
+                s["challenge_deadline"] = 0
+            else:
+                # Challenge upheld: Sponsor recovery authorized
+                s["status"] = STATUS_CHALLENGE_UPHELD
+                b["status"] = STATUS_CHALLENGE_UPHELD
+
+        self._save_submission(s)
+        self._save_bounty(b)
+        return s["status"]
+
+    @gl.public.write
+    def withdraw_challenge(self, submission_id: u256) -> str:
+        """
+        Permits the Sponsor to voluntarily withdraw an active challenge,
+        dismissing the dispute and immediately qualifying the submission for hunter payout.
+        """
+        s = self._get_submission(submission_id)
+        if s is None:
+            return "ERR_SUBMISSION_NOT_FOUND"
+
+        b = self._get_bounty(u256(s["bounty_id"]))
+        caller = current_sender()
+
+        if caller != b["sponsor"]:
+            return "ERR_ONLY_SPONSOR_MAY_WITHDRAW"
+
+        if s["status"] != STATUS_DISPUTED or b["status"] != STATUS_DISPUTED:
+            return "ERR_SUBMISSION_NOT_DISPUTED"
+
+        s["status"] = STATUS_MATCH_UPHELD
+        s["reason"] = REASON_CHALLENGE_WITHDRAWN
+        s["challenge_deadline"] = 0
+        s["revision"] += 1
+
+        b["status"] = STATUS_MATCH_UPHELD
+        self._save_submission(s)
+        self._save_bounty(b)
+        return STATUS_MATCH_UPHELD
 
     @gl.public.write
     def retry_unresolved(self, submission_id: u256, expected_revision: u256) -> str:
@@ -647,9 +880,13 @@ class DracoLatch(gl.Contract):
     @gl.public.write
     def finalize_match(self, submission_id: u256) -> str:
         """
-        Settles approved bounty to claimant after challenge window lapses.
-        Enforces Checks-Effects-Interactions (CEI): clears locked principal
-        and commits terminal state before external transfer.
+        Settles approved bounty to claimant.
+        Authorized under three distinct conditions:
+        1. Normal Happy Path: s.status == MATCH_PENDING and current_timestamp() > s.challenge_deadline.
+        2. Adjudicated / Withdrawn Dispute: s.status == MATCH_UPHELD (appellate review ruled in hunter's favor).
+        3. Abandoned Dispute Fallback: s.status == DISPUTED and current_timestamp() > s.dispute_deadline
+           (prevents unilateral indefinite lockup if sponsor challenges and walks away).
+        Enforces Checks-Effects-Interactions (CEI) before external transfer.
         """
         s = self._get_submission(submission_id)
         if s is None:
@@ -659,7 +896,17 @@ class DracoLatch(gl.Contract):
         if caller != s["claimant"]:
             return "ERR_ONLY_CLAIMANT_MAY_FINALIZE"
 
-        if s["status"] != STATUS_MATCH_PENDING or current_timestamp() <= s["challenge_deadline"]:
+        now_ts = current_timestamp()
+        is_finalizable = False
+
+        if s["status"] == STATUS_MATCH_PENDING and now_ts > s["challenge_deadline"]:
+            is_finalizable = True
+        elif s["status"] == STATUS_MATCH_UPHELD:
+            is_finalizable = True
+        elif s["status"] == STATUS_DISPUTED and now_ts > s.get("dispute_deadline", 0):
+            is_finalizable = True
+
+        if not is_finalizable:
             return "ERR_NOT_READY_FOR_FINALIZATION"
 
         b = self._get_bounty(u256(s["bounty_id"]))
@@ -687,8 +934,9 @@ class DracoLatch(gl.Contract):
     def recover_bounty(self, bounty_id: u256) -> str:
         """
         Permits Sponsor to recover escrowed capital under verified refund conditions:
-        1. Submission deadline expired with no accepted claim, OR
-        2. Active submission reached retry exhaustion in UNRESOLVED state.
+        1. Submission deadline expired with no accepted claim (b.status == OPEN), OR
+        2. Active submission reached retry exhaustion in UNRESOLVED state, OR
+        3. Dispute adjudicated in sponsor's favor (b.status == CHALLENGE_UPHELD).
         """
         b = self._get_bounty(bounty_id)
         if b is None:
@@ -707,6 +955,8 @@ class DracoLatch(gl.Contract):
             act_sub = self._get_submission(u256(b["active_submission"]))
             if act_sub and act_sub["attempts"] >= MAX_ASSESSMENT_RETRIES:
                 is_recoverable = True
+        elif b["status"] == STATUS_CHALLENGE_UPHELD:
+            is_recoverable = True
 
         if not is_recoverable:
             return "ERR_BOUNTY_NOT_RECOVERABLE"
@@ -735,8 +985,8 @@ class DracoLatch(gl.Contract):
         """Returns protocol metadata and deployment capabilities."""
         return {
             "name": "DracoLatch",
-            "version": 1,
-            "architecture": "commit-reveal-disclosure-escrow",
+            "version": 2,
+            "architecture": "commit-reveal-disclosure-escrow-with-appellate-adjudication",
             "authority": "SEC EDGAR Canonical Archive",
             "frontrunning_protection": True,
             "active_disputes": True,

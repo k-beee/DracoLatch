@@ -107,13 +107,22 @@ In disclosure bounties, naive implementations accept plain accession numbers in 
 $$\text{commitment} = \text{SHA256}(\text{claimant\_address} \parallel \text{accession} \parallel \text{salt})$$
 Only the address that submitted the original commitment can reveal the filing and claim the reward.
 
-### 2. Active Challenge & Dispute Mechanism
-Rather than treating the challenge window as a passive delay, DracoLatch provides `challenge_match(submission_id, reason)`. During the challenge window, the Sponsor can formally dispute a false-positive match, halting automated finalization and transitioning the contract to `DISPUTED`.
+### 2. Active Challenge, Appellate Adjudication & Dual Settlement Paths
+Rather than treating the challenge window as a passive delay or permitting unilateral indefinite lockup, DracoLatch provides a complete dispute lifecycle:
+- **`challenge_match(submission_id, reason)`**: During the challenge window, the Sponsor can formally dispute a provisionally approved match, halting automated finalization and transitioning the contract to `DISPUTED`.
+- **`adjudicate_dispute(submission_id, revision)`**: Executes multi-validator appellate review comparing locked requirements, filing evidence, and the sponsor's allegations:
+  - **Outcome 1 (Hunter Payout):** If validators rule `DISMISS_CHALLENGE`, the match is upheld (`MATCH_UPHELD`) and the hunter finalizes 100% of the bounty payout via `finalize_match`.
+  - **Outcome 2 (Sponsor Recovery):** If validators rule `UPHOLD_CHALLENGE`, the match is overturned (`CHALLENGE_UPHELD`) and the sponsor recovers 100% of escrowed funds via `recover_bounty`.
+- **`withdraw_challenge(submission_id)`**: Sponsor can voluntarily withdraw a dispute, restoring `MATCH_UPHELD` for immediate hunter payout.
+- **Anti-Deadlock Fallback**: If a sponsor challenges and abandons the dispute past `dispute_deadline`, the claimant can finalize payout, preventing unilateral permanent lockups.
 
-### 3. Context-Preserving HTML Sanitization
+### 3. Commit Slot Reservation vs Direct Submissions
+An active `commit_claim` transitions the bounty to `RESERVED`, atomically locking the claim slot against direct submissions (`submit_direct`) and competing committers. If the committer fails to reveal within `COMMITMENT_EXPIRY_SEC` (1 hour), the reservation expires and releases the slot.
+
+### 4. Context-Preserving HTML Sanitization
 SEC EDGAR filings contain extensive raw HTML tags, `<style>` definitions, and script tags that consume thousands of prompt tokens and trigger delimiter collisions. DracoLatch sanitizes filing text on-chain prior to prompt execution, preserving model reasoning bandwidth.
 
-### 4. Cross-Field Logical Invariants
+### 5. Cross-Field Logical Invariants
 The contract enforces strict multi-boolean invariant validation inside validator evaluation:
 $$\text{verdict} = \text{MATCH} \iff (\text{entity\_match} \land \text{material\_event\_match} \land \text{temporal\_match})$$
 Contradictory model outputs fail closed immediately as `UNRESOLVED / MODEL_CONTRADICTION`.
@@ -122,27 +131,29 @@ Contradictory model outputs fail closed immediately as `UNRESOLVED / MODEL_CONTR
 
 ## Contract Method Index
 
-### Write Methods (6 Operational + 3 Enhanced)
+### Write Methods (11 Methods: 6 Operational + 5 Enhanced Governance)
 
 | Method | Role | Payable | Description |
 | :--- | :--- | :--- | :--- |
 | `create_bounty(...)` | Sponsor | **Yes** | Funds a new disclosure requirement; refunds invalid deposits |
-| `commit_claim(...)` | Hunter | No | Reserves claim slot with `sha256(claimant + accession + salt)` |
+| `commit_claim(...)` | Hunter | No | Reserves claim slot with `sha256(claimant + accession + salt)`; locks against direct submissions |
 | `reveal_and_submit(...)` | Hunter | No | Reveals committed accession and establishes submission entry |
-| `submit_direct(...)` | Hunter | No | Direct submission pathway for open/uncontested bounties |
+| `submit_direct(...)` | Hunter | No | Direct submission pathway for open/unreserved bounties |
 | `assess_submission(...)` | Participant | No | Multi-validator SEC retrieval and comparative LLM consensus |
 | `challenge_match(...)` | Sponsor | No | Registers formal dispute during open challenge window |
+| `adjudicate_dispute(...)` | Participant | No | Multi-validator appellate adjudication resolving dispute to hunter payout or sponsor recovery |
+| `withdraw_challenge(...)` | Sponsor | No | Voluntarily dismisses dispute challenge, authorizing claimant payout |
 | `retry_unresolved(...)` | Participant | No | Re-opens assessment for failed rounds (max 2 attempts) |
-| `finalize_match(...)` | Claimant | No | Clears liability and executes payout after challenge window |
-| `recover_bounty(...)` | Sponsor | No | Recovers principal if deadline expired or retries exhausted |
+| `finalize_match(...)` | Claimant | No | Clears liability and executes payout (happy path, adjudicated match, or abandoned dispute) |
+| `recover_bounty(...)` | Sponsor | No | Recovers principal if deadline expired, retries exhausted, or challenge upheld |
 
 ### View Methods
 
 | Method | Returns | Description |
 | :--- | :--- | :--- |
-| `get_protocol()` | `dict` | Protocol version, capabilities, and authority metadata |
-| `get_bounty(id)` | `dict` | Full bounty record, deadlines, and locked principal |
-| `get_submission(id)` | `dict` | Submission state, digests, attempts, and reason codes |
+| `get_protocol()` | `dict` | Protocol version (v2), capabilities, and authority metadata |
+| `get_bounty(id)` | `dict` | Full bounty record, deadlines, commit reservations, and locked principal |
+| `get_submission(id)` | `dict` | Submission state, digests, dispute grounds, attempts, and reason codes |
 | `get_totals()` | `dict` | Aggregate locked, paid, and refunded GEN accounting |
 
 ---
@@ -159,8 +170,9 @@ Run all unit tests, contract linters, and validations with a single command:
 Or run individual components:
 
 ```bash
-# 1. Run Python unit & adversarial test suite (14 tests)
+# 1. Run Python unit & adversarial test suite (20 tests)
 python3 -m pytest -v tests/test_draco_latch.py
+
 
 # 2. Check DracoLatch against official GenVM linter
 python3 -m genvm_linter.cli check contracts/draco_latch.py

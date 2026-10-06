@@ -72,6 +72,11 @@ class MockNondet:
             "temporal_match": True,
             "reason_code": "REQUIREMENT_SATISFIED"
         }
+        self.adjudication_model_output = {
+            "verdict": "DISMISS_CHALLENGE",
+            "reason_code": "CHALLENGE_DISMISSED",
+            "explanation": "Filing satisfies all required conditions"
+        }
         self.web = types.SimpleNamespace(get=self.get)
 
     def get(self, url, headers=None):
@@ -80,7 +85,9 @@ class MockNondet:
                 return res
         return WebResponse(404, b"NOT_FOUND")
 
-    def exec_prompt(self, *args, **kwargs):
+    def exec_prompt(self, prompt, *args, **kwargs):
+        if "appellate" in str(prompt).lower():
+            return self.adjudication_model_output
         return self.default_model_output
 
 class MockEqPrinciple:
@@ -471,3 +478,238 @@ def test_html_tag_stripping_and_sanitization(runtime):
     assert "<style>" not in cleaned
     assert "<h1>" not in cleaned
     assert "Item 5.02 Departure of Directors On June 25, 2025, Apple Inc. announced a planned COO transition." in cleaned
+
+def test_active_commit_reserves_slot_against_direct_submission(runtime):
+    """
+    Verifies that an active commitment transitions the bounty to RESERVED and
+    strictly blocks direct submissions and racing committers until revealed or expired.
+    """
+    contract, gl, _, _, _, _ = runtime
+    create_sample_bounty(contract, gl)
+
+    set_sender(gl, CLAIMANT)
+    salt = "secret_salt"
+    accession = "0001140361-25-025275"
+    doc = "ef20051741_8k.htm"
+    digest = "79d278b5c34a40ec5618d5286c983120346ebb58ccd8587339533b88e7f22e37"
+    commitment = hashlib.sha256(f"{CLAIMANT}:{accession}:{salt}".encode("utf-8")).hexdigest()
+
+    # Hunter A commits
+    assert contract.commit_claim(U256(1), commitment) == "COMMITMENT_RECORDED"
+    bounty = contract.get_bounty(U256(1))
+    assert bounty["status"] == "RESERVED"
+    assert bounty["active_committer"] == CLAIMANT
+
+    # Outsider tries direct submission while reservation is active -> BLOCKED
+    set_sender(gl, OUTSIDER)
+    blocked_direct = contract.submit_direct(U256(1), accession, doc, digest)
+    assert blocked_direct == "ERR_SLOT_RESERVED_BY_COMMITMENT"
+
+    # Outsider tries to commit while reservation is active -> BLOCKED
+    outsider_commit = hashlib.sha256(f"{OUTSIDER}:{accession}:salt2".encode("utf-8")).hexdigest()
+    blocked_commit = contract.commit_claim(U256(1), outsider_commit)
+    assert blocked_commit == "ERR_BOUNTY_ALREADY_RESERVED"
+
+    # True committer successfully reveals and claims slot
+    set_sender(gl, CLAIMANT)
+    reveal_res = contract.reveal_and_submit(U256(1), accession, doc, digest, salt)
+    assert int(reveal_res) == 1
+
+    bounty_after = contract.get_bounty(U256(1))
+    assert bounty_after["status"] == "CLAIMED"
+    assert bounty_after["active_committer"] == ""
+
+def test_expired_commit_releases_slot_for_direct_submission(runtime):
+    """
+    Verifies that when a commitment reservation expires without reveal,
+    the reservation lock lifts and direct submission is permitted.
+    """
+    contract, gl, _, _, _, _ = runtime
+    create_sample_bounty(contract, gl)
+
+    set_sender(gl, CLAIMANT)
+    salt = "secret_salt"
+    accession = "0001140361-25-025275"
+    doc = "ef20051741_8k.htm"
+    digest = "79d278b5c34a40ec5618d5286c983120346ebb58ccd8587339533b88e7f22e37"
+    commitment = hashlib.sha256(f"{CLAIMANT}:{accession}:{salt}".encode("utf-8")).hexdigest()
+
+    contract.commit_claim(U256(1), commitment)
+    assert contract.get_bounty(U256(1))["status"] == "RESERVED"
+
+    # Advance time beyond commitment expiry (1 hour = 3600s)
+    gl.message_raw["datetime"] = "2026-09-26T01:05:00+00:00"
+
+    # Outsider submits directly after expiry -> SUCCEEDS
+    set_sender(gl, OUTSIDER)
+    sid = contract.submit_direct(U256(1), accession, doc, digest)
+    assert int(sid) == 1
+
+    sub = contract.get_submission(U256(1))
+    assert sub["status"] == "CLAIMED"
+    assert sub["claimant"] == OUTSIDER
+
+def test_dispute_adjudication_dismisses_challenge_and_settles_hunter_payout(runtime):
+    """
+    Full Adjudication & Settlement Path 1 (Hunter Payout):
+    1. Submission provisionally approved as MATCH_PENDING.
+    2. Sponsor challenges match -> status DISPUTED.
+    3. Validators adjudicate dispute and find challenge groundless (DISMISS_CHALLENGE).
+    4. Submission transitions to MATCH_UPHELD.
+    5. Claimant finalizes match -> receives 100% principal payout.
+    """
+    contract, gl, nondet, _, transfers, _ = runtime
+    create_sample_bounty(contract, gl, 10**18)
+
+    doc_content = b"Official SEC filing with complete executive transition disclosures"
+    setup_mock_sec_archive(nondet, doc_content)
+
+    set_sender(gl, CLAIMANT)
+    contract.submit_direct(U256(1), "0001140361-25-025275", "ef20051741_8k.htm", hashlib.sha256(doc_content).hexdigest())
+
+    set_sender(gl, SPONSOR)
+    contract.assess_submission(U256(1), U256(1))
+    assert contract.get_submission(U256(1))["status"] == "MATCH_PENDING"
+
+    # Sponsor challenges
+    challenge_res = contract.challenge_match(U256(1), "Alleging duties missing from filing")
+    assert challenge_res == "DISPUTED"
+    assert contract.get_bounty(U256(1))["status"] == "DISPUTED"
+
+    # Configure appellate validator model output: Dismiss challenge (Hunter wins)
+    nondet.adjudication_model_output = {
+        "verdict": "DISMISS_CHALLENGE",
+        "reason_code": "CHALLENGE_DISMISSED",
+        "explanation": "Filing substantively satisfies all required conditions"
+    }
+
+    # Hunter (or Sponsor) triggers adjudication
+    set_sender(gl, CLAIMANT)
+    curr_rev = contract.get_submission(U256(1))["revision"]
+    adj_status = contract.adjudicate_dispute(U256(1), U256(curr_rev))
+    assert adj_status == "MATCH_UPHELD"
+    assert contract.get_submission(U256(1))["status"] == "MATCH_UPHELD"
+    assert contract.get_bounty(U256(1))["status"] == "MATCH_UPHELD"
+
+    # Hunter finalizes match and receives payout
+    finalize_res = contract.finalize_match(U256(1))
+    assert finalize_res == "PAID"
+    assert contract.get_submission(U256(1))["status"] == "PAID"
+    assert contract.get_bounty(U256(1))["status"] == "PAID"
+
+    # Principal transferred to Hunter
+    assert transfers[-1] == (CLAIMANT, 10**18)
+    totals = contract.get_totals()
+    assert totals["locked_wei"] == "0"
+    assert totals["paid_wei"] == str(10**18)
+
+def test_dispute_adjudication_upholds_challenge_and_authorizes_sponsor_recovery(runtime):
+    """
+    Full Adjudication & Settlement Path 2 (Sponsor Recovery):
+    1. Submission provisionally approved as MATCH_PENDING.
+    2. Sponsor challenges match -> status DISPUTED.
+    3. Validators adjudicate dispute and uphold challenge (UPHOLD_CHALLENGE).
+    4. Submission and bounty transition to CHALLENGE_UPHELD.
+    5. Hunter finalization rejected.
+    6. Sponsor calls recover_bounty -> receives 100% refund.
+    """
+    contract, gl, nondet, _, transfers, _ = runtime
+    create_sample_bounty(contract, gl, 10**18)
+
+    doc_content = b"Official SEC filing"
+    setup_mock_sec_archive(nondet, doc_content)
+
+    set_sender(gl, CLAIMANT)
+    contract.submit_direct(U256(1), "0001140361-25-025275", "ef20051741_8k.htm", hashlib.sha256(doc_content).hexdigest())
+
+    set_sender(gl, SPONSOR)
+    contract.assess_submission(U256(1), U256(1))
+
+    # Sponsor challenges
+    contract.challenge_match(U256(1), "Filing does not name executive transition duties")
+
+    # Configure appellate validator model output: Uphold challenge (Sponsor wins)
+    nondet.adjudication_model_output = {
+        "verdict": "UPHOLD_CHALLENGE",
+        "reason_code": "CHALLENGE_UPHELD",
+        "explanation": "Filing is missing required material transition duties"
+    }
+
+    # Sponsor triggers adjudication
+    curr_rev = contract.get_submission(U256(1))["revision"]
+    adj_status = contract.adjudicate_dispute(U256(1), U256(curr_rev))
+    assert adj_status == "CHALLENGE_UPHELD"
+    assert contract.get_bounty(U256(1))["status"] == "CHALLENGE_UPHELD"
+
+    # Hunter cannot finalize
+    set_sender(gl, CLAIMANT)
+    assert contract.finalize_match(U256(1)) == "ERR_NOT_READY_FOR_FINALIZATION"
+
+    # Sponsor recovers principal
+    set_sender(gl, SPONSOR)
+    recover_res = contract.recover_bounty(U256(1))
+    assert recover_res == "REFUNDED"
+    assert contract.get_bounty(U256(1))["status"] == "REFUNDED"
+
+    # Refund transferred to Sponsor
+    assert transfers[-1] == (SPONSOR, 10**18)
+    totals = contract.get_totals()
+    assert totals["locked_wei"] == "0"
+    assert totals["refunded_wei"] == str(10**18)
+
+def test_dispute_sponsor_withdraw_challenge_and_hunter_payout(runtime):
+    """
+    Verifies that the Sponsor can voluntarily withdraw a challenge,
+    unlocking immediate finalization for the hunter.
+    """
+    contract, gl, nondet, _, transfers, _ = runtime
+    create_sample_bounty(contract, gl, 10**18)
+
+    doc_content = b"Official SEC filing"
+    setup_mock_sec_archive(nondet, doc_content)
+
+    set_sender(gl, CLAIMANT)
+    contract.submit_direct(U256(1), "0001140361-25-025275", "ef20051741_8k.htm", hashlib.sha256(doc_content).hexdigest())
+
+    set_sender(gl, SPONSOR)
+    contract.assess_submission(U256(1), U256(1))
+    contract.challenge_match(U256(1), "Temporary concern")
+    assert contract.get_bounty(U256(1))["status"] == "DISPUTED"
+
+    # Sponsor voluntarily withdraws challenge
+    withdraw_res = contract.withdraw_challenge(U256(1))
+    assert withdraw_res == "MATCH_UPHELD"
+
+    # Claimant finalizes payout
+    set_sender(gl, CLAIMANT)
+    assert contract.finalize_match(U256(1)) == "PAID"
+    assert transfers[-1] == (CLAIMANT, 10**18)
+
+def test_dispute_timeout_abandonment_settles_hunter(runtime):
+    """
+    Anti-Deadlock Invariant:
+    If a sponsor files a challenge and abandons it without adjudication,
+    the dispute window expires and the hunter can finalize payout.
+    Prevents unilateral indefinite lockup.
+    """
+    contract, gl, nondet, _, transfers, _ = runtime
+    create_sample_bounty(contract, gl, 10**18)
+
+    doc_content = b"Official SEC filing"
+    setup_mock_sec_archive(nondet, doc_content)
+
+    set_sender(gl, CLAIMANT)
+    contract.submit_direct(U256(1), "0001140361-25-025275", "ef20051741_8k.htm", hashlib.sha256(doc_content).hexdigest())
+
+    set_sender(gl, SPONSOR)
+    contract.assess_submission(U256(1), U256(1))
+    contract.challenge_match(U256(1), "Abandoned challenge")
+
+    # Time advances beyond dispute deadline (e.g. 2 days later)
+    gl.message_raw["datetime"] = "2026-09-28T01:00:00+00:00"
+
+    # Hunter finalizes after dispute deadline lapsed
+    set_sender(gl, CLAIMANT)
+    assert contract.finalize_match(U256(1)) == "PAID"
+    assert transfers[-1] == (CLAIMANT, 10**18)
+
